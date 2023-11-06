@@ -17,10 +17,14 @@
 #include "Orbitron_Medium_20.h"
 #include "Orbitron_Medium_25.h"
 #include "signal_indicator.h"
-#include "low_charge.h"
-#include "medium_charge.h"
-#include "high_charge.h"
-#include "charging.h"
+#include "battery_charge.h"
+#include "battery_full.h"
+#include "battery_high.h"
+#include "battery_half.h"
+#include "battery_low.h"
+#include "battery_warn.h"
+#include "battery_empty.h"
+
 
 // Firebase API key and database URL
 #define API_KEY "AIzaSyAiJhUBmb3WuXkMFxbwvxTdvMnfSCc8zPM"
@@ -41,6 +45,12 @@
 // Define the maximum and minimum battery voltages
 #define MAX_BATTERY_VOLTAGE 4.2
 #define MIN_BATTERY_VOLTAGE 3.2
+
+#define MEASUREMENT_INTERVAL 10000 // Measure every 10 seconds
+#define VOLTAGE_INCREASE_THRESHOLD 0.01 // Adjust as needed
+
+float lastVoltage = 0.0;
+unsigned long lastMeasurementMillis = 0;
 
 Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 
@@ -99,7 +109,7 @@ void setup(){
   sprSignalIndicator.createSprite(67, 30);
   sprDistressSignal.createSprite(135, 10);
   sprTitle.createSprite(135, 60);
-  sprLine.createSprite(1, 140);
+  sprLine.createSprite(1, 135);
   sprHeartRate.createSprite(66, 70);
   sprBloodOxygen.createSprite(66, 70);
   sprBodyTemperature.createSprite(66, 70);
@@ -389,21 +399,51 @@ void readBattery() {
   float voltage = analogRead(ADC_PIN) / 4095.0 * VREF * VOLTAGE_DIVIDER_RATIO;
 
   // Map the voltage to a percentage (0-100)
-  int percentage = constrain(map(voltage, MIN_BATTERY_VOLTAGE, MAX_BATTERY_VOLTAGE, 0, 100), 0, 100);
+  int percentage = map(voltage, MIN_BATTERY_VOLTAGE, MAX_BATTERY_VOLTAGE, 0, 100);
+
+  // Check if the device is charging
+  bool isCharging = isBatteryCharging();
 
   // Draw the battery indicator
-  drawBatteryIndicator(percentage);
+  drawBatteryIndicator(percentage, isCharging);
 }
 
-void drawBatteryIndicator(int percentage) {
+bool isBatteryCharging() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastMeasurementMillis >= MEASUREMENT_INTERVAL) {
+    lastMeasurementMillis = currentMillis;
+
+    float voltage = analogRead(ADC_PIN) / 4095.0 * VREF * VOLTAGE_DIVIDER_RATIO;
+    bool isCharging = (voltage - lastVoltage) > VOLTAGE_INCREASE_THRESHOLD;
+
+    lastVoltage = voltage;
+
+    return isCharging;
+  }
+
+  // If not enough time has passed since the last measurement, return false
+  return false;
+}
+
+void drawBatteryIndicator(int percentage, bool isCharging) {
   sprBatteryIndicator.fillSprite(TFT_BLACK);
 
-  if (percentage < 20) {
-    sprBatteryIndicator.pushImage(40, 0, 24, 24, low_charge); // Low battery
-  } else if (percentage < 50) {
-    sprBatteryIndicator.pushImage(40, 0, 24, 24, medium_charge); // Medium battery
+  if(isCharging) {
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, battery_charge);
+  }
+
+  if (percentage > 99) {
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, battery_full);
+  } else if (percentage > 59 && percentage < 100) {
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, battery_high);
+  } else if (percentage > 39 && percentage < 60) {
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, battery_half);
+  } else if (percentage > 19 && percentage < 40) {
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, battery_low);
+  } else if (percentage > 1 && percentage < 20) {
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, battery_warn);
   } else {
-    sprBatteryIndicator.pushImage(40, 0, 24, 24, high_charge); // High battery
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, battery_empty);
   }
 
   sprBatteryIndicator.pushSprite(69, 0);
@@ -413,9 +453,9 @@ void signalIndicator() {
   int rssi = WiFi.RSSI();
 
   sprSignalIndicator.fillSprite(TFT_BLACK);
-  sprSignalIndicator.pushImage(0, 3, 16, 16, signal_indicator);
+  sprSignalIndicator.pushImage(0, 4, 16, 16, signal_indicator);
   sprSignalIndicator.setTextColor(TFT_WHITE,TFT_BLACK);
-  sprSignalIndicator.drawString(String(rssi) + "dBm", 18, 7);
+  sprSignalIndicator.drawString(String(rssi) + "dBm", 18, 8);
 
   sprSignalIndicator.pushSprite(0,0);
 }
