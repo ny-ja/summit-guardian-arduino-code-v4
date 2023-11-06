@@ -1,0 +1,421 @@
+#include <WiFiManager.h>
+#include <Firebase_ESP_Client.h>
+#include "addons/TokenHelper.h"
+#include "addons/RTDBHelper.h"
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <WiFi.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_MLX90614.h>
+#include "Orbitron_Medium_10.h"
+#include "Orbitron_Medium_12.h"
+#include "Orbitron_Medium_15.h"
+#include "Orbitron_Medium_20.h"
+#include "Orbitron_Medium_25.h"
+#include "signal_indicator.h"
+#include "low_charge.h"
+#include "medium_charge.h"
+#include "high_charge.h"
+#include "charging.h"
+
+// Firebase API key and database URL
+#define API_KEY "AIzaSyAiJhUBmb3WuXkMFxbwvxTdvMnfSCc8zPM"
+#define DATABASE_URL "https://summit-guardian-rtdb-default-rtdb.asia-southeast1.firebasedatabase.app"
+
+#define BUTTON_PIN_1 0
+#define BUTTON_PIN_2 35
+
+// Define the ADC pin
+#define ADC_PIN 35
+
+// Define the voltage divider ratio
+#define VOLTAGE_DIVIDER_RATIO 2
+
+// Define the reference voltage
+#define VREF 3.3
+
+// Define the maximum and minimum battery voltages
+#define MAX_BATTERY_VOLTAGE 4.2
+#define MIN_BATTERY_VOLTAGE 3.2
+
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+
+// Firebase objects
+FirebaseData fbdo;      // Firebase data object
+FirebaseAuth auth;      // Firebase authentication object
+FirebaseConfig config;  // Firebase configuration object
+
+// Heart rate sensor object
+MAX30105 particleSensor;
+
+// Constants for heart rate calculation
+const byte RATE_SIZE = 4;
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+long lastBeat = 0;
+float beatsPerMinute;
+int beatAvg;
+
+// Timer for sending data to Firebase
+unsigned long sendDataPrevMillis = 0;
+
+// Flag for successful signup
+bool signupOK = false;
+
+TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite spr = TFT_eSprite(&tft);
+
+TFT_eSprite sprSignalIndicator = TFT_eSprite(&tft);
+TFT_eSprite sprBatteryIndicator = TFT_eSprite(&tft);
+TFT_eSprite sprDistressSignal = TFT_eSprite(&tft);
+TFT_eSprite sprTitle = TFT_eSprite(&tft);
+TFT_eSprite sprLine = TFT_eSprite(&tft);
+TFT_eSprite sprHeartRate = TFT_eSprite(&tft);
+TFT_eSprite sprBloodOxygen = TFT_eSprite(&tft);
+TFT_eSprite sprBodyTemperature = TFT_eSprite(&tft);
+TFT_eSprite sprAmbientTemperature = TFT_eSprite(&tft);
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 32
+#define OLED_RESET -1
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+void setup(){
+  Serial.begin(115200);
+
+  if (!mlx.begin()) {
+    Serial.println("Error connecting to MLX sensor. Check wiring.");
+    while (1);
+  };
+
+  tft.init();
+  spr.createSprite(135, 240);
+  sprBatteryIndicator.createSprite(67, 30);
+  sprSignalIndicator.createSprite(67, 30);
+  sprDistressSignal.createSprite(135, 10);
+  sprTitle.createSprite(135, 60);
+  sprLine.createSprite(1, 140);
+  sprHeartRate.createSprite(66, 70);
+  sprBloodOxygen.createSprite(66, 70);
+  sprBodyTemperature.createSprite(66, 70);
+  sprAmbientTemperature.createSprite(66, 70);
+  tft.fillScreen(TFT_BLACK);
+  sprSignalIndicator.setSwapBytes(true);
+  sprBatteryIndicator.setSwapBytes(true);
+
+  pinMode(BUTTON_PIN_1, INPUT_PULLUP);
+  pinMode(BUTTON_PIN_2, INPUT_PULLUP);
+
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.display();
+
+  setupWiFi();
+
+  initializeFirebase();
+  
+  // Initialize heart rate sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println("MAX30105 was not found. Please check wiring/power.");
+    while (1);
+  }
+
+  particleSensor.setup();
+  particleSensor.setPulseAmplitudeRed(0x0A);
+  particleSensor.setPulseAmplitudeGreen(0);
+
+  printTitle();
+  drawLine();
+}
+
+void setupWiFi() {
+  WiFiManager wm;
+
+  //wm.resetSettings();
+
+  bool res;
+
+  spr.fillSprite(TFT_BLACK);
+  spr.setFreeFont(&Orbitron_Medium_10);
+  spr.setTextColor(TFT_WHITE,TFT_BLACK);
+  spr.drawString("Connecting to WiFi...", 0, 0);
+  spr.pushSprite(0,0);
+
+  res = wm.autoConnect("SummitGuardianAP","password");
+
+  // Clear the message after WiFi is connected
+  if(res) {
+      spr.fillSprite(TFT_BLACK);
+      spr.pushSprite(0,0);
+  }
+}
+
+void initializeFirebase() {
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Firebase signUp successful.");
+    signupOK = true;
+  } else {
+    Serial.printf("%s\n", config.signer.signupError.message.c_str());
+  }
+
+  config.token_status_callback = tokenStatusCallback;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+void printTitle() {
+  sprTitle.fillSprite(TFT_BLACK);
+
+  sprTitle.setFreeFont(&Orbitron_Medium_20);
+  sprTitle.setTextColor(TFT_CYAN,TFT_BLACK);
+  sprTitle.drawString("SUMMIT", 20, 0);
+  sprTitle.drawString("GUARDIAN", 3, 20);
+
+  sprTitle.pushSprite(0,40);
+}
+
+void loop(){
+  long irValue = particleSensor.getIR();
+
+  if (irValue > 7000) {
+    displayHeartRateData(irValue);
+    if (checkHeartbeat(irValue)) {
+      long delta = millis() - lastBeat;
+      lastBeat = millis();
+
+      beatsPerMinute = 60 / (delta / 1000.0);
+
+      if (beatsPerMinute < 255 && beatsPerMinute > 20) {
+        rates[rateSpot++] = (byte)beatsPerMinute;
+        rateSpot %= RATE_SIZE;
+        beatAvg = 0;
+        for (byte x = 0; x < RATE_SIZE; x++)
+          beatAvg += rates[x];
+        beatAvg /= RATE_SIZE;
+      }
+    }
+
+    sendHeartRateDataToFirebase();
+  }
+
+  if (irValue < 7000) {
+    beatAvg = 0;
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 0);
+    display.println("BPM:");
+    display.setCursor(0, 0);
+    display.println(beatAvg);
+    display.display();
+
+    sprHeartRate.fillSprite(TFT_BLACK);
+
+    sprHeartRate.setFreeFont(&Orbitron_Medium_15);
+    sprHeartRate.setTextColor(TFT_WHITE,TFT_BLACK);
+    sprHeartRate.drawString("BPM:", 0, 0);
+    sprHeartRate.setFreeFont(&Orbitron_Medium_25);
+    sprHeartRate.drawString(String(beatAvg), 0, 20);
+
+    sprHeartRate.pushSprite(0,100);
+  }
+
+  displayBloodOxygenData();
+
+  sendBodyTemperatureToFirebase();
+
+  sendAmbientTemperatureToFirebase();
+
+  sendDistressSignal();
+
+  readBattery();
+
+  signalIndicator();
+}
+
+void displayHeartRateData(long irValue) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.println("BPM");
+  display.setCursor(0, 0);
+  display.println(beatAvg);
+  display.display();
+
+  sprHeartRate.fillSprite(TFT_BLACK);
+
+  sprHeartRate.setFreeFont(&Orbitron_Medium_15);
+  sprHeartRate.setTextColor(TFT_WHITE,TFT_BLACK);
+  sprHeartRate.drawString("BPM:", 0, 0);
+  sprHeartRate.setFreeFont(&Orbitron_Medium_25);
+  sprHeartRate.drawString(String(beatAvg), 0, 20);
+
+  sprHeartRate.pushSprite(0,100);
+}
+
+bool checkHeartbeat(long irValue) {
+  if (checkForBeat(irValue) == true) {
+    return true;
+  }
+  return false;
+}
+
+void sendHeartRateDataToFirebase() {
+  if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 1000 || sendDataPrevMillis == 0)) {
+    sendDataPrevMillis = millis();
+    if (Firebase.RTDB.setInt(&fbdo, "sensor/heartRate", beatAvg)) {
+      Serial.println(beatAvg);
+      Serial.print("- Successfully saved heart rate to: " + fbdo.dataPath());
+      Serial.println(" (" + fbdo.dataType() + ")");
+    } else {
+      Serial.println("FAILED: " + fbdo.errorReason());
+    }
+  }
+}
+
+void displayBloodOxygenData() {
+  int spo2 = 0;
+  sprBloodOxygen.fillSprite(TFT_BLACK);
+
+  sprBloodOxygen.setFreeFont(&Orbitron_Medium_15);
+  sprBloodOxygen.setTextColor(TFT_WHITE,TFT_BLACK);
+  sprBloodOxygen.drawString("SPO2:", 0, 0);
+  sprBloodOxygen.setFreeFont(&Orbitron_Medium_25);
+  sprBloodOxygen.drawString(String(spo2), 0, 20);
+
+  sprBloodOxygen.pushSprite(0,170);
+}
+
+void displayBodyTemperatureData(float bodyTempC) {
+  sprBodyTemperature.fillSprite(TFT_BLACK);
+
+  sprBodyTemperature.setFreeFont(&Orbitron_Medium_12);
+  sprBodyTemperature.setTextColor(TFT_WHITE,TFT_BLACK);
+  sprBodyTemperature.drawString("body", 2, 0);
+  sprBodyTemperature.drawString("temp:", 2, 15);
+  sprBodyTemperature.setFreeFont(&Orbitron_Medium_15);
+  sprBodyTemperature.drawString(String(bodyTempC), 2, 32);
+
+  sprBodyTemperature.pushSprite(70,100);
+}
+
+void sendBodyTemperatureToFirebase() {
+  if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 1000 || sendDataPrevMillis == 0)) {
+    sendDataPrevMillis = millis();
+
+    float bodyTempC = mlx.readObjectTempC();
+
+    // Round to two decimal places
+    bodyTempC = roundf(bodyTempC * 100) / 100;
+
+    displayBodyTemperatureData(bodyTempC);
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensor/bodyTemperature", bodyTempC)) {
+      Serial.println(bodyTempC);
+      Serial.print("- Successfully saved body temperature to: " + fbdo.dataPath());
+      Serial.println(" (" + fbdo.dataType() + ")");
+    } else {
+      Serial.println("FAILED: " + fbdo.errorReason());
+    }
+  }
+}
+
+void displayAmbientTemperatureData(float ambientTempF) {
+  sprAmbientTemperature.fillSprite(TFT_BLACK);
+
+  sprAmbientTemperature.setFreeFont(&Orbitron_Medium_12);
+  sprAmbientTemperature.setTextColor(TFT_WHITE,TFT_BLACK);
+  sprAmbientTemperature.drawString("ambient", 2, 0);
+  sprAmbientTemperature.drawString("temp:", 2, 15);
+  sprAmbientTemperature.setFreeFont(&Orbitron_Medium_15);
+  sprAmbientTemperature.drawString(String(ambientTempF), 2, 32);
+
+  sprAmbientTemperature.pushSprite(70,170);
+}
+
+void sendAmbientTemperatureToFirebase() {
+  if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 1000 || sendDataPrevMillis == 0)) {
+    sendDataPrevMillis = millis();
+
+    float ambientTempF = mlx.readAmbientTempF();
+
+    // Round to two decimal places
+    ambientTempF = roundf(ambientTempF * 100) / 100;
+
+    displayAmbientTemperatureData(ambientTempF);
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensor/ambientTemperature", ambientTempF)) {
+      Serial.println(ambientTempF);
+      Serial.print("- Successfully saved ambient temperature to: " + fbdo.dataPath());
+      Serial.println(" (" + fbdo.dataType() + ")");
+    } else {
+      Serial.println("FAILED: " + fbdo.errorReason());
+    }
+  }
+}
+
+void drawLine() {
+  sprLine.fillSprite(TFT_CYAN);
+  
+  sprLine.pushSprite(68, 100);
+}
+
+void sendDistressSignal() {
+  if (digitalRead(BUTTON_PIN_1) == LOW && digitalRead(BUTTON_PIN_2) == LOW && signupOK) {
+    bool bVal;
+    Serial.printf("Set bool... %s\n", Firebase.RTDB.setBool(&fbdo, F("isClimberDanger"), true) ? "ok" : fbdo.errorReason().c_str());
+
+    sprDistressSignal.fillSprite(TFT_BLACK);
+
+    sprDistressSignal.setFreeFont(&Orbitron_Medium_10);
+    sprDistressSignal.setTextColor(TFT_GREEN,TFT_BLACK);
+    sprDistressSignal.drawString("Distress signal sent.", 0, 0);
+
+    sprDistressSignal.pushSprite(0,30);
+  }
+}
+
+void readBattery() {
+  // Read the battery voltage
+  float voltage = analogRead(ADC_PIN) / 4095.0 * VREF * VOLTAGE_DIVIDER_RATIO;
+
+  // Map the voltage to a percentage (0-100)
+  int percentage = constrain(map(voltage, MIN_BATTERY_VOLTAGE, MAX_BATTERY_VOLTAGE, 0, 100), 0, 100);
+
+  // Draw the battery indicator
+  drawBatteryIndicator(percentage);
+}
+
+void drawBatteryIndicator(int percentage) {
+  sprBatteryIndicator.fillSprite(TFT_BLACK);
+
+  if (percentage < 20) {
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, low_charge); // Low battery
+  } else if (percentage < 50) {
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, medium_charge); // Medium battery
+  } else {
+    sprBatteryIndicator.pushImage(40, 0, 24, 24, high_charge); // High battery
+  }
+
+  sprBatteryIndicator.pushSprite(69, 0);
+}
+
+void signalIndicator() {
+  int rssi = WiFi.RSSI();
+
+  sprSignalIndicator.fillSprite(TFT_BLACK);
+  sprSignalIndicator.pushImage(0, 3, 16, 16, signal_indicator);
+  sprSignalIndicator.setTextColor(TFT_WHITE,TFT_BLACK);
+  sprSignalIndicator.drawString(String(rssi) + "dBm", 18, 7);
+
+  sprSignalIndicator.pushSprite(0,0);
+}
