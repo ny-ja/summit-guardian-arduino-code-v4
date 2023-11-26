@@ -2,13 +2,14 @@
 #include <Firebase_ESP_Client.h>
 #include "addons/TokenHelper.h"
 #include "addons/RTDBHelper.h"
+#include <TinyGPSPlus.h>
+#include <SoftwareSerial.h>
 #include <Wire.h>
 #include "MAX30105.h"
 #include "heartRate.h"
 #include <TFT_eSPI.h>
 #include <SPI.h>
 #include <WiFi.h>
-#include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_MLX90614.h>
 #include "Orbitron_Medium_10.h"
@@ -27,8 +28,8 @@
 
 
 // Firebase API key and database URL
-#define API_KEY "AIzaSyAiJhUBmb3WuXkMFxbwvxTdvMnfSCc8zPM"
-#define DATABASE_URL "https://summit-guardian-rtdb-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define API_KEY "AIzaSyBzQHnktl3MRsWiUdyGmzI6iBiPfi15COQ"
+#define DATABASE_URL "https://summit-guardian-db-fa6c5-default-rtdb.asia-southeast1.firebasedatabase.app"
 
 #define BUTTON_PIN_1 0
 #define BUTTON_PIN_2 35
@@ -48,6 +49,12 @@
 
 #define MEASUREMENT_INTERVAL 10000 // Measure every 10 seconds
 #define VOLTAGE_INCREASE_THRESHOLD 0.01 // Adjust as needed
+
+static const int RXPin = 13, TXPin = 12;
+static const uint32_t GPSBaud = 9600;
+
+TinyGPSPlus gps;
+SoftwareSerial ss(RXPin, TXPin);
 
 float lastVoltage = 0.0;
 unsigned long lastMeasurementMillis = 0;
@@ -98,10 +105,22 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 void setup(){
   Serial.begin(115200);
 
+  // Initialize heart rate sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println("MAX30105 was not found. Please check wiring/power.");
+    while (1);
+  }
+
+  particleSensor.setup();
+  particleSensor.setPulseAmplitudeRed(0x0A);
+  particleSensor.setPulseAmplitudeGreen(0);
+
   if (!mlx.begin()) {
     Serial.println("Error connecting to MLX sensor. Check wiring.");
     while (1);
   };
+
+  ss.begin(GPSBaud);
 
   tft.init();
   spr.createSprite(135, 240);
@@ -127,16 +146,8 @@ void setup(){
   setupWiFi();
 
   initializeFirebase();
-  
-  // Initialize heart rate sensor
-  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
-    Serial.println("MAX30105 was not found. Please check wiring/power.");
-    while (1);
-  }
 
-  particleSensor.setup();
-  particleSensor.setPulseAmplitudeRed(0x0A);
-  particleSensor.setPulseAmplitudeGreen(0);
+  sendLocationCoordinateToFirebase();
 
   printTitle();
   drawLine();
@@ -145,7 +156,7 @@ void setup(){
 void setupWiFi() {
   WiFiManager wm;
 
-  //wm.resetSettings();
+  wm.resetSettings();
 
   bool res;
 
@@ -194,9 +205,12 @@ void printTitle() {
 void loop(){
   long irValue = particleSensor.getIR();
 
+  sendDistressSignalAndLocation();
+
   if (irValue > 7000) {
     displayHeartRateData(irValue);
-    if (checkHeartbeat(irValue)) {
+
+    if (checkForBeat(irValue) == true) {
       long delta = millis() - lastBeat;
       lastBeat = millis();
 
@@ -211,21 +225,11 @@ void loop(){
         beatAvg /= RATE_SIZE;
       }
     }
-
     sendHeartRateDataToFirebase();
   }
 
   if (irValue < 7000) {
     beatAvg = 0;
-
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(WHITE);
-    display.setCursor(0, 0);
-    display.println("BPM:");
-    display.setCursor(0, 0);
-    display.println(beatAvg);
-    display.display();
 
     sprHeartRate.fillSprite(TFT_BLACK);
 
@@ -244,23 +248,13 @@ void loop(){
 
   sendAmbientTemperatureToFirebase();
 
-  sendDistressSignal();
-
   readBattery();
 
   signalIndicator();
+
 }
 
 void displayHeartRateData(long irValue) {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  display.setCursor(0, 0);
-  display.println("BPM");
-  display.setCursor(0, 0);
-  display.println(beatAvg);
-  display.display();
-
   sprHeartRate.fillSprite(TFT_BLACK);
 
   sprHeartRate.setFreeFont(&Orbitron_Medium_15);
@@ -272,16 +266,10 @@ void displayHeartRateData(long irValue) {
   sprHeartRate.pushSprite(0,100);
 }
 
-bool checkHeartbeat(long irValue) {
-  if (checkForBeat(irValue) == true) {
-    return true;
-  }
-  return false;
-}
-
 void sendHeartRateDataToFirebase() {
   if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 1000 || sendDataPrevMillis == 0)) {
     sendDataPrevMillis = millis();
+
     if (Firebase.RTDB.setInt(&fbdo, "sensor/heartRate", beatAvg)) {
       Serial.println(beatAvg);
       Serial.print("- Successfully saved heart rate to: " + fbdo.dataPath());
@@ -373,15 +361,56 @@ void sendAmbientTemperatureToFirebase() {
   }
 }
 
+void sendLocationCoordinateToFirebase() {
+  if(gps.location.isValid() && signupOK) {
+    float latitude = gps.location.lat();
+    float longitude = gps.location.lng();
+
+    if (Firebase.RTDB.setFloat(&fbdo, "locationCoordinate/latitude", latitude)) {
+      Serial.println(latitude, 6);
+      Serial.print("- Successfully saved latitude to: " + fbdo.dataPath());
+      Serial.println(" (" + fbdo.dataType() + ")");
+    } else {
+      Serial.println("FAILED: " + fbdo.errorReason());
+    }
+
+    if (Firebase.RTDB.setFloat(&fbdo, "locationCoordinate/longitude", longitude)) {
+      Serial.println(longitude, 6);
+      Serial.print("- Successfully saved longitude to: " + fbdo.dataPath());
+      Serial.println(" (" + fbdo.dataType() + ")");
+    } else {
+      Serial.println("FAILED: " + fbdo.errorReason());
+    }
+  }
+
+  smartDelay(1000);
+
+  if (millis() > 5000 && gps.charsProcessed() < 10){
+    Serial.println(F("No GPS data received: check wiring"));
+  }
+}
+
+static void smartDelay(unsigned long ms) {
+  unsigned long start = millis();
+  do 
+  {
+    while (ss.available())
+      gps.encode(ss.read());
+  } while (millis() - start < ms);
+}
+
 void drawLine() {
   sprLine.fillSprite(TFT_CYAN);
   
   sprLine.pushSprite(68, 100);
 }
 
-void sendDistressSignal() {
+void sendDistressSignalAndLocation() {
   if (digitalRead(BUTTON_PIN_1) == LOW && digitalRead(BUTTON_PIN_2) == LOW && signupOK) {
     bool bVal;
+
+    sendLocationCoordinateToFirebase();
+
     Serial.printf("Set bool... %s\n", Firebase.RTDB.setBool(&fbdo, F("isClimberDanger"), true) ? "ok" : fbdo.errorReason().c_str());
 
     sprDistressSignal.fillSprite(TFT_BLACK);
