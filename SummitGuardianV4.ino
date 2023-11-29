@@ -77,6 +77,9 @@ long lastBeat = 0;
 float beatsPerMinute;
 int beatAvg;
 
+long lowStartTime = 0; // Time when heart rate first went below 60
+long highStartTime = 0; // Time when heart rate first went above 100
+
 // Timer for sending data to Firebase
 unsigned long sendDataPrevMillis = 0;
 
@@ -223,6 +226,28 @@ void loop(){
         for (byte x = 0; x < RATE_SIZE; x++)
           beatAvg += rates[x];
         beatAvg /= RATE_SIZE;
+      }
+
+      // Check if average heart rate is below 60 or above 100 for half of an hour
+      if (beatAvg < 60) {
+        if (lowStartTime == 0) { // Start the timer
+          lowStartTime = millis();
+        } else if (millis() - lowStartTime >= 30 * 60 * 1000) { // Check if half of an hour has passed
+          Serial.println("Need help: Heart rate has been below 60 for half of an hour");
+          sendAlternativeDistressSignalAndLocation();
+          lowStartTime = 0; // Reset the timer
+        }
+      } else if (beatAvg > 100) {
+        if (highStartTime == 0) { // Start the timer
+          highStartTime = millis();
+        } else if (millis() - highStartTime >= 30 * 60 * 1000) { // Check if half of an hour has passed
+          Serial.println("Need help: Heart rate has been above 100 for half of an hour");
+          sendAlternativeDistressSignalAndLocation();
+          highStartTime = 0; // Reset the timer
+        }
+      } else { // Reset the timers if heart rate is normal
+        lowStartTime = 0;
+        highStartTime = 0;
       }
     }
     sendHeartRateDataToFirebase();
@@ -421,6 +446,20 @@ void sendDistressSignalAndLocation() {
 
     sprDistressSignal.pushSprite(0,30);
   }
+}
+
+void sendAlternativeDistressSignalAndLocation() {
+    sendLocationCoordinateToFirebase();
+
+    Serial.printf("Set bool... %s\n", Firebase.RTDB.setBool(&fbdo, F("isClimberDanger"), true) ? "Distress signal successfully sent." : fbdo.errorReason().c_str());
+
+    sprDistressSignal.fillSprite(TFT_BLACK);
+
+    sprDistressSignal.setFreeFont(&Orbitron_Medium_10);
+    sprDistressSignal.setTextColor(TFT_GREEN,TFT_BLACK);
+    sprDistressSignal.drawString("Distress signal sent.", 0, 0);
+
+    sprDistressSignal.pushSprite(0,30);
 }
 
 void readBattery() {
