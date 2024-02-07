@@ -26,10 +26,9 @@
 #include "battery_warn.h"
 #include "battery_empty.h"
 
-
 // Firebase API key and database URL
-#define API_KEY "AIzaSyBzQHnktl3MRsWiUdyGmzI6iBiPfi15COQ"
-#define DATABASE_URL "https://summit-guardian-db-fa6c5-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define API_KEY "AIzaSyAzfVy326lVhrbdF_qtaG7LpBxJ8ID0RSk"
+#define DATABASE_URL "https://summit-guardian-db-7ae6c-default-rtdb.asia-southeast1.firebasedatabase.app/"
 
 #define BUTTON_PIN_1 0
 #define BUTTON_PIN_2 35
@@ -150,7 +149,7 @@ void setup(){
 
   initializeFirebase();
 
-  sendLocationCoordinateToFirebase();
+  Firebase.RTDB.setBool(&fbdo, "isClimberDanger", false);
 
   printTitle();
   drawLine();
@@ -269,9 +268,7 @@ void loop(){
 
   displayBloodOxygenData();
 
-  sendBodyTemperatureToFirebase();
-
-  sendAmbientTemperatureToFirebase();
+  sendBodyAndAmbientTemperatureToFirebase();
 
   readBattery();
 
@@ -331,27 +328,6 @@ void displayBodyTemperatureData(float bodyTempC) {
   sprBodyTemperature.pushSprite(70,100);
 }
 
-void sendBodyTemperatureToFirebase() {
-  if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 1000 || sendDataPrevMillis == 0)) {
-    sendDataPrevMillis = millis();
-
-    float bodyTempC = mlx.readObjectTempC();
-
-    // Round to two decimal places
-    bodyTempC = roundf(bodyTempC * 100) / 100;
-
-    displayBodyTemperatureData(bodyTempC);
-
-    if (Firebase.RTDB.setFloat(&fbdo, "sensor/bodyTemperature", bodyTempC)) {
-      Serial.println(bodyTempC);
-      Serial.print("- Successfully saved body temperature to: " + fbdo.dataPath());
-      Serial.println(" (" + fbdo.dataType() + ")");
-    } else {
-      Serial.println("FAILED: " + fbdo.errorReason());
-    }
-  }
-}
-
 void displayAmbientTemperatureData(float ambientTempF) {
   sprAmbientTemperature.fillSprite(TFT_BLACK);
 
@@ -365,14 +341,26 @@ void displayAmbientTemperatureData(float ambientTempF) {
   sprAmbientTemperature.pushSprite(70,170);
 }
 
-void sendAmbientTemperatureToFirebase() {
+void sendBodyAndAmbientTemperatureToFirebase() {
   if (Firebase.ready() && signupOK && (millis() - sendDataPrevMillis > 1000 || sendDataPrevMillis == 0)) {
     sendDataPrevMillis = millis();
 
+    float bodyTempC = mlx.readObjectTempC();
     float ambientTempF = mlx.readAmbientTempF();
 
     // Round to two decimal places
+    bodyTempC = roundf(bodyTempC * 100) / 100;
     ambientTempF = roundf(ambientTempF * 100) / 100;
+
+    displayBodyTemperatureData(bodyTempC);
+
+    if (Firebase.RTDB.setFloat(&fbdo, "sensor/bodyTemperature", bodyTempC)) {
+      Serial.println(bodyTempC);
+      Serial.print("- Successfully saved body temperature to: " + fbdo.dataPath());
+      Serial.println(" (" + fbdo.dataType() + ")");
+    } else {
+      Serial.println("FAILED: " + fbdo.errorReason());
+    }
 
     displayAmbientTemperatureData(ambientTempF);
 
